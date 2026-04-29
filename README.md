@@ -1,46 +1,23 @@
-\# Photographers OSM Scraper
+# Data Scraping Project
 
+This project demonstrates web scraping and data extraction using Python.
 
+## Features
 
-Python script that collects photographer data from OpenStreetMap.
+- Scrapes structured data from websites
+- Processes and stores data using pandas
+- Exports results to CSV and Excel
+- Includes a working demo scraper and sample output
 
+## Technologies
 
+- Python
+- requests
+- BeautifulSoup
+- pandas
 
-\## Features
+## How to run
 
-\- Collects photographers from OSM
-
-\- Exports to CSV and Excel
-
-\- Includes phone, email, website (if available)
-
-
-
-\## Installation
-
-
-
-python -m venv .venv
-
-.venv\\Scripts\\activate
-
+```bash
 pip install -r requirements.txt
-
-
-
-\## Run
-
-
-
-python photographers\_greece.py
-
-
-
-\## Output
-
-
-
-\- photographers\_greece.csv
-
-\- photographers\_greece.xlsx
-
+python countries_demo_scraper.py
