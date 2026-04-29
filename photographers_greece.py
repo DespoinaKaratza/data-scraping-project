@@ -1,130 +1,167 @@
 import time
-import requests
-import pandas as pd
+from pathlib import Path
 
-# Δοκιμάζουμε 2 Overpass endpoints (αν ένα ζορίζεται)
+import pandas as pd
+import requests
+
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ]
 
-AREA_NAME = "Greece"         # όλη η χώρα
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
 OUTPUT_BASENAME = "photographers_greece"
 
-# Θέλουμε και craft=photographer ΚΑΙ shop=photo
-TAGS = [("craft", "photographer"), ("shop", "photo")]
+TAGS = [
+    ("craft", "photographer"),
+    ("shop", "photo"),
+    ("shop", "photography"),
+]
 
-def build_query(area_name: str) -> str:
-    """
-    ΣΩΣΤΟ OverpassQL:
-    - ΟΡΙΖΕΙ area ...
-    - ΚΑΙ μετά κάνει ξεχωριστές εντολές για node/way/relation ανά tag,
-      ΟΧΙ αλυσίδες στον ίδιο selector (εκεί ήταν το συντακτικό λάθος).
-    """
-    node_parts = "\n  ".join([f'node["{k}"="{v}"](area.searchArea);' for k, v in TAGS])
-    way_parts  = "\n  ".join([f'way["{k}"="{v}"](area.searchArea);'  for k, v in TAGS])
-    rel_parts  = "\n  ".join([f'relation["{k}"="{v}"](area.searchArea);' for k, v in TAGS])
+def build_query() -> str:
+    tag_queries = []
 
-    q = f"""
+    for key, value in TAGS:
+        tag_queries.append(f'node["{key}"="{value}"](area.searchArea);')
+        tag_queries.append(f'way["{key}"="{value}"](area.searchArea);')
+        tag_queries.append(f'relation["{key}"="{value}"](area.searchArea);')
+
+    tag_block = "\n  ".join(tag_queries)
+
+    query = f"""
 [out:json][timeout:300];
-area[name="{area_name}"][boundary=administrative][admin_level=2]->.searchArea;
+area["wikidata"="Q41"][boundary=administrative]->.searchArea;
 (
-  {node_parts}
-  {way_parts}
-  {rel_parts}
+  {tag_block}
 );
 out center tags;
 """
-    return q
+    return query
 
 def fetch_overpass(query: str, max_retries: int = 5) -> dict:
-    last_err = None
+    last_error = None
+
     for endpoint in OVERPASS_ENDPOINTS:
         for attempt in range(max_retries):
             try:
-                r = requests.post(endpoint, data={"data": query}, timeout=360)
-                if r.status_code in (429, 504) or r.status_code >= 500:
+                response = requests.post(
+                    endpoint,
+                    data={"data": query},
+                    timeout=360,
+                )
+
+                if response.status_code in (429, 500, 502, 503, 504):
                     wait = min(20 * (attempt + 1), 90)
-                    print(f"[{endpoint}] {r.status_code} — περιμένω {wait}s και ξαναδοκιμάζω…")
+                    print(f"[{endpoint}] {response.status_code} — waiting {wait}s...")
                     time.sleep(wait)
                     continue
-                if r.status_code == 400:
-                    # Εκτύπωσε και το σώμα για debugging αν πάει κάτι στραβά
-                    print(f"[{endpoint}] 400 Bad Request\n{r.text[:500]}")
-                    r.raise_for_status()
-                r.raise_for_status()
-                return r.json()
-            except Exception as e:
-                last_err = e
-        # αν εξαντλήσαμε τα retries για το συγκεκριμένο endpoint, πάμε στο επόμενο
-    raise RuntimeError(f"Overpass απέτυχε: {last_err}")
 
-def rows_from_elements(elements, area_label):
+                if response.status_code == 400:
+                    print(response.text[:500])
+
+                response.raise_for_status()
+                return response.json()
+
+            except Exception as error:
+                last_error = error
+                time.sleep(5)
+
+    raise RuntimeError(f"Overpass request failed: {last_error}")
+
+def rows_from_elements(elements):
     rows = []
-    for el in elements:
-        tags = el.get("tags") or {}
+
+    for element in elements:
+        tags = element.get("tags") or {}
 
         name = (tags.get("name") or "").strip() or None
         phone = (tags.get("phone") or tags.get("contact:phone") or "").strip() or None
         email = (tags.get("email") or tags.get("contact:email") or "").strip() or None
         website = (tags.get("website") or tags.get("contact:website") or "").strip() or None
 
-        street = tags.get("addr:street")
-        housenumber = tags.get("addr:housenumber")
-        city = tags.get("addr:city")
-        postcode = tags.get("addr:postcode")
-        address = ", ".join(x for x in [street, housenumber, city, postcode] if x)
+        address_parts = [
+            tags.get("addr:street"),
+            tags.get("addr:housenumber"),
+            tags.get("addr:city"),
+            tags.get("addr:postcode"),
+        ]
+        address = ", ".join(part for part in address_parts if part) or None
 
-        lat = el.get("lat") or (el.get("center") or {}).get("lat")
-        lon = el.get("lon") or (el.get("center") or {}).get("lon")
+        lat = element.get("lat") or (element.get("center") or {}).get("lat")
+        lon = element.get("lon") or (element.get("center") or {}).get("lon")
 
-        # Κρατάμε και την πηγή tag (craft=photographer/shop=photo) για πληροφόρηση
-        src = None
+        source_tag = None
         if tags.get("craft") == "photographer":
-            src = "craft=photographer"
+            source_tag = "craft=photographer"
         elif tags.get("shop") == "photo":
-            src = "shop=photo"
+            source_tag = "shop=photo"
+        elif tags.get("shop") == "photography":
+            source_tag = "shop=photography"
 
         rows.append({
             "name": name,
             "phone": phone,
             "email": email,
             "website": website,
-            "address": address if address else None,
-            "lat": lat,
-            "lon": lon,
-            "source_tag": src,
-            "osm_type": el.get("type"),
-            "osm_id": el.get("id"),
-            "area": area_label,
+            "address": address,
+            "latitude": lat,
+            "longitude": lon,
+            "source_tag": source_tag,
+            "osm_type": element.get("type"),
+            "osm_id": element.get("id"),
         })
+
     return rows
 
 def main():
-    print(f"Αναζήτηση στο OSM για φωτογράφους: {AREA_NAME} …")
-    query = build_query(AREA_NAME)
+    print("Searching OSM for photographers in Greece...")
+
+    query = build_query()
     data = fetch_overpass(query)
-    elems = data.get("elements", [])
-    print(f"Βρέθηκαν {len(elems)} στοιχεία. Εξαγωγή…")
 
-    rows = rows_from_elements(elems, AREA_NAME)
+    elements = data.get("elements", [])
+    print(f"Raw OSM elements found: {len(elements)}")
 
+    rows = rows_from_elements(elements)
     df = pd.DataFrame(rows)
+
     if not df.empty:
-        # Ελάχιστο καθάρισμα + διπλότυπα
-        df = df[(df["name"].notna()) | (df["phone"].notna()) | (df["email"].notna()) | (df["website"].notna())]
-        df = df.drop_duplicates(subset=["name", "address", "phone", "lat", "lon"], keep="first")
+        df = df[
+            (df["name"].notna())
+            | (df["phone"].notna())
+            | (df["email"].notna())
+            | (df["website"].notna())
+        ]
 
-    # Αποθήκευση σε CSV + XLSX (overwrite καθαρά)
-    csv_path = f"{OUTPUT_BASENAME}.csv"
-    xlsx_path = f"{OUTPUT_BASENAME}.xlsx"
+        df = df.drop_duplicates(
+            subset=["osm_type", "osm_id"],
+            keep="first",
+        )
 
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    with pd.ExcelWriter(xlsx_path, engine="openpyxl", mode="w") as writer:
+        df = df.drop_duplicates(
+            subset=["name", "phone", "website", "latitude", "longitude"],
+            keep="first",
+        )
+
+    full_csv = OUTPUT_DIR / f"{OUTPUT_BASENAME}.csv"
+    full_xlsx = OUTPUT_DIR / f"{OUTPUT_BASENAME}.xlsx"
+    sample_xlsx = OUTPUT_DIR / f"sample_{OUTPUT_BASENAME}.xlsx"
+
+    df.to_csv(full_csv, index=False, encoding="utf-8-sig")
+
+    with pd.ExcelWriter(full_xlsx, engine="openpyxl", mode="w") as writer:
         df.to_excel(writer, index=False)
 
-    print(f"OK -> {csv_path}  +  {xlsx_path}")
-    print(f"Σύνολο εγγραφών: {len(df)}")
+    with pd.ExcelWriter(sample_xlsx, engine="openpyxl", mode="w") as writer:
+        df.head(50).to_excel(writer, index=False)
+
+    print("Done.")
+    print(f"Clean records: {len(df)}")
+    print(f"Full CSV: {full_csv}")
+    print(f"Full Excel: {full_xlsx}")
+    print(f"Sample Excel: {sample_xlsx}")
 
 if __name__ == "__main__":
     main()
